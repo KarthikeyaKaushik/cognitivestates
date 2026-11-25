@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import json
 import unittest
@@ -96,9 +98,11 @@ class FixedReadoutFigureTests(unittest.TestCase):
                             train_accuracy=0.8, test_accuracy=0.7)
             with patch.object(sweep, 'OUTPUT_DIR', root), \
                     patch.object(sweep, 'run_one', side_effect=fake_run), \
-                    patch.object(figure, 'get_task_lattice', return_value=Lattice()):
+                    patch.object(figure, 'get_task_lattice', return_value=Lattice()), \
+                    patch.object(figure, 'save_curated_stackedbar') as curated:
                 directory = figure.run_fixed_readout_sweep(
                     [2.0, 3.0], 2, 1, readout_scale=4.0)
+            curated.assert_not_called()  # lnorms do not cover 1..6
             winners = pd.read_csv(directory / 'coloring_winners.csv')
             self.assertEqual(len(winners), 4)
             self.assertEqual(winners.groupby('lnorm').size().tolist(), [2, 2])
@@ -108,33 +112,81 @@ class FixedReadoutFigureTests(unittest.TestCase):
                               readout_scale=4.0), cache_version=1))
             self.assertEqual(directory.name, expected_id)
 
-    def test_curated_plot_excludes_only_identified_runs_and_renormalizes(self):
+    def test_sweep_plots_curated_stackedbar_when_lnorms_cover_1_through_6(self):
+        from scripts import constrained_penalty_sweep as sweep
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            matrices = root / 'runs'
+            def fake_run(root_arg, lnorm, seed, epochs, *, readout_norm, readout_scale):
+                run_id = f'{lnorm}-{seed}'
+                directory = matrices / run_id
+                directory.mkdir(parents=True)
+                np.savez(directory / 'decoding_heatmap.npz',
+                         matrix=np.array([[1, 0.5, 0.9], [0.5, 1, 0.9],
+                                          [0.9, 0.9, 1]]))
+                return dict(run_id=run_id, lnorm=lnorm, seed=seed,
+                            train_accuracy=0.8, test_accuracy=0.7)
+            with patch.object(sweep, 'OUTPUT_DIR', root), \
+                    patch.object(sweep, 'run_one', side_effect=fake_run), \
+                    patch.object(figure, 'get_task_lattice', return_value=Lattice()), \
+                    patch.object(figure, 'save_curated_stackedbar') as curated:
+                directory = figure.run_fixed_readout_sweep(
+                    [float(x) for x in range(1, 7)], 1, 1, readout_scale=4.0)
+            curated.assert_called_once_with(directory)
+
+    def test_curated_plot_excludes_15_color_winners_and_renormalizes(self):
         rows = [dict(run_key=f'keep-{lnorm}-{color}', lnorm=lnorm, nstates=color, auc=0.9)
                 for lnorm in range(1, 8) for color in (5, 6)]
-        rows += [dict(run_key=key, lnorm=lnorm, nstates=15, auc=1.0)
-                 for key, lnorm in figure.CURATED_EXCLUSIONS.items()]
+        rows += [dict(run_key='drop-1', lnorm=1.0, nstates=15, auc=1.0),
+                 dict(run_key='drop-3', lnorm=3.0, nstates=15, auc=1.0),
+                 dict(run_key='keep-7-15', lnorm=7.0, nstates=15, auc=1.0)]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / 'coloring_winners.csv'
             pd.DataFrame(rows).to_csv(source, index=False)
             before = source.read_bytes()
-            path = figure.save_curated_stackedbar(root)
-            self.assertTrue(path.exists())
+            captured = []
+            def capture(fig, *args, **kwargs):
+                captured.append(fig)
+            buffer = io.StringIO()
+            with patch.object(Figure, 'savefig', capture), \
+                    contextlib.redirect_stdout(buffer):
+                path = figure.save_curated_stackedbar(root)
+            self.assertEqual(path, root / 'ncolors_stackedbar_curated.png')
             self.assertEqual(source.read_bytes(), before)
+            output = buffer.getvalue()
+            self.assertIn('drop-1', output)
+            self.assertIn('drop-3', output)
+            self.assertIn('Excluded 2 run(s)', output)
+            self.assertNotIn('keep-7-15', output)  # outside lnorm 1..6
             winners = pd.read_csv(root / 'coloring_winners_curated.csv')
             self.assertEqual(len(winners), 12)
             self.assertEqual(set(winners['lnorm']), set(range(1, 7)))
-            self.assertFalse(winners['run_key'].isin(figure.CURATED_EXCLUSIONS).any())
+            self.assertFalse(winners['run_key'].isin(['drop-1', 'drop-3']).any())
+            self.assertFalse((winners['nstates'] == 15).any())
             proportions = pd.read_csv(root / 'coloring_proportions_curated.csv')
             np.testing.assert_allclose(proportions['proportion'], 0.5)
             np.testing.assert_allclose(proportions.groupby('lnorm')['proportion'].sum(), 1)
+            ax = captured[0].axes[0]
+            self.assertEqual([tick.get_text() for tick in ax.get_yticklabels()],
+                             [f'1/{value}' for value in range(1, 7)])
+            self.assertEqual(ax.get_title(), '')
 
-    def test_curated_plot_requires_both_exact_exclusions(self):
+    def test_curated_plot_requires_full_lnorm_coverage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             pd.DataFrame([dict(run_key='other', lnorm=1, nstates=5, auc=1)]).to_csv(
                 root / 'coloring_winners.csv', index=False)
-            with self.assertRaisesRegex(ValueError, 'Expected 15-color winner'):
+            with self.assertRaisesRegex(ValueError, 'do not cover every requested lnorm'):
+                figure.save_curated_stackedbar(root)
+            # an lnorm represented only by an excluded 15-color winner is missing too
+            rows = [dict(run_key=f'keep-{lnorm}', lnorm=lnorm, nstates=5, auc=0.9)
+                    for lnorm in (1, 3, 4, 5, 6)]
+            rows.append(dict(run_key='only-15', lnorm=2, nstates=15, auc=1.0))
+            pd.DataFrame(rows).to_csv(root / 'coloring_winners.csv', index=False)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), \
+                    self.assertRaisesRegex(ValueError, 'do not cover every requested lnorm'):
                 figure.save_curated_stackedbar(root)
 
     def test_curated_cli_never_runs_training(self):
@@ -177,8 +229,12 @@ class FixedReadoutFigureTests(unittest.TestCase):
                 np.testing.assert_array_equal(fig.get_size_inches(), [5, 5])
                 ax = fig.axes[0]
                 self.assertEqual(len(ax.patches), 6)
+                if column == 'test_accuracy':
+                    expected_ticks = [f'1/{value}' for value in range(1, 7)]
+                else:
+                    expected_ticks = [str(value) for value in range(1, 7)]
                 self.assertEqual([tick.get_text() for tick in ax.get_xticklabels()],
-                                 [str(value) for value in range(1, 7)])
+                                 expected_ticks)
                 self.assertEqual(ax.get_xlabel(), 'Lnorm penalty')
                 self.assertEqual(ax.get_ylabel(), 'Accuracy')
 
@@ -229,7 +285,7 @@ class FixedReadoutFigureTests(unittest.TestCase):
             winners = [dict(run_key=f'keep-{lnorm}', lnorm=lnorm, nstates=size, auc=1)
                        for lnorm, size in enumerate((2, 3, 4, 2, 3, 4), start=1)]
             winners += [dict(run_key=key, lnorm=lnorm, nstates=15, auc=1)
-                        for key, lnorm in figure.CURATED_EXCLUSIONS.items()]
+                        for key, lnorm in (('excluded-a', 1.0), ('excluded-b', 3.0))]
             pd.DataFrame(winners).to_csv(summary / 'coloring_winners.csv', index=False)
             captured = []
             def capture(fig, *args, **kwargs):

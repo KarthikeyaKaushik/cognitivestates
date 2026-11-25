@@ -67,7 +67,7 @@ python scripts/fig_supp_linearitybaseline.py
 
 ### Activity-penalty sweep (Fig. 5)
 
-Train the sweep: lnorm 1–8, 100 seeds, readout norm fixed at 4× its
+Train the sweep: lnorm 1–6, 100 seeds, readout norm fixed at 4× its
 initialization, and 2,000 epochs. This is the expensive step:
 
 ```bash
@@ -76,11 +76,15 @@ python scripts/fig5_constrained_stack.py --fixed-readout-sweep \
 ```
 
 This prints a summary directory, `results/constrained_penalty_sweep/summaries/<id>`.
-The following commands replot from that cache without retraining:
+Pairwise state decodability uses balanced LDA accuracy, so unequal state
+visitation cannot inflate it (chance is 0.5 for every pair). The sweep also
+draws the curated stacked bar automatically, excluding (and printing) every
+run whose winning coloring uses 15 colors. The following commands replot from
+the cache without retraining:
 
 ```bash
 SUMMARY=results/constrained_penalty_sweep/summaries/<id>
-python scripts/fig5_constrained_stack.py --curated-summary $SUMMARY        # stacked bar
+python scripts/fig5_constrained_stack.py --curated-summary $SUMMARY        # curated stacked bar
 python scripts/fig5_constrained_stack.py --auc-histogram-summary $SUMMARY  # ROC-AUC histograms
 python scripts/fig5_constrained_stack.py --accuracy-summary $SUMMARY       # train/held-out boxplots
 ```

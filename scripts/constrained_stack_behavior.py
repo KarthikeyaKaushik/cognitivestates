@@ -25,8 +25,9 @@ diagram.{dot,svg,png,pdf} with state IDs, a separate diagram for the five most
 visited states (or all states if fewer than five), and a cumulative state-visit
 plot in figures/. Visits include sequence starts and every transition arrival.
 Each run also stores decoding_heatmap.npz and decoding_heatmap.png: full-vector
-pairwise LDA training accuracies for reference task states, using the original
-80% training split and all timesteps (as in the earlier constrained heatmaps).
+pairwise LDA balanced training accuracies for reference task states, using the
+original 80% training split and all timesteps (as in the earlier constrained
+heatmaps, but imbalance-corrected: chance is 0.5 for every pair).
 These labels are reference stack states, not inferred behavioral state IDs.
 --sweep-summary with one or more --run LNORM SEED pairs analyzes existing
 fully trained sweep checkpoints without training or changing the sweep files.

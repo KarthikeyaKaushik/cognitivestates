@@ -437,7 +437,9 @@ def constrained_run(task_name, seed, lnorm, train_L=7, hidden_dim=5,
     results/constrained_heatmaps/<run_key>.npy. Hidden states are discarded.
 
     As in the legacy run_constrained.py, the decodability matrix is computed
-    on the train split without timestep trimming and without class balancing.
+    on the train split without timestep trimming. Unlike the legacy code, the
+    pairwise entries are balanced accuracies, so unequal state visitation
+    cannot inflate them (identical representations score 0.5).
 
     Returns (row_dict, pairwise_matrix).
     """

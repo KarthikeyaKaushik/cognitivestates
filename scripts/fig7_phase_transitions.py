@@ -9,11 +9,13 @@ Defaults reproduce scripts_old/simulations_probe.sh: limitedstack, length 7,
 hidden dimension 5, lnorm 1.2, 5000 epochs, seeds 0..100, Adam lr=.001, batch
 size 128, and an 80/20 split. The legacy loss-change score uses delta=100.
 At t-=peak-delta and t+=peak+delta (zero-based epochs, AFTER the update),
-full-hidden-vector pairwise LDA TRAINING accuracies are compared with the
-upper triangles of consistent-coloring matrices and 100 Bernoulli random
+full-hidden-vector pairwise LDA balanced TRAINING accuracies are compared with
+the upper triangles of consistent-coloring matrices and 100 Bernoulli random
 pair masks. This is the legacy in-sample analysis, NOT the held-out 2D SVM
-analysis used for the other decoding figures. Each family's winner is
-selected at t+ and that SAME candidate is plotted at both checkpoints.
+analysis used for the other decoding figures; unlike the legacy code, the
+pairwise accuracies are balanced, so unequal state visitation cannot inflate
+them. Each family's winner is selected at t+ and that SAME candidate is
+plotted at both checkpoints.
 
 Two legacy bugs are corrected: one-class proposals are excluded because
 ROC-AUC is undefined, and the checkpoint replay restores the original weights

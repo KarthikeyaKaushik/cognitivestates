@@ -10,14 +10,19 @@ import torch
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.decomposition import FastICA, FactorAnalysis
 from sklearn.linear_model import Perceptron
-from sklearn.metrics import classification_report
+from sklearn.metrics import balanced_accuracy_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 
 
 def train_lda_from_tensors(X_tensor: torch.Tensor, Y_labels: torch.Tensor,
                            return_preds=False):
-    """Fit an LDA classifier on (N, D) activations; returns overall accuracy."""
+    """Fit an LDA classifier on (N, D) activations; returns balanced accuracy.
+
+    Balanced accuracy (mean per-class recall) keeps chance at 1/n_classes even
+    when state visitation frequencies are unequal; ordinary accuracy would
+    equal the majority-class fraction for identical representations.
+    """
     X = X_tensor.detach().cpu().numpy()
     if isinstance(Y_labels, torch.Tensor):
         Y = Y_labels.detach().cpu().numpy()
@@ -28,17 +33,19 @@ def train_lda_from_tensors(X_tensor: torch.Tensor, Y_labels: torch.Tensor,
     lda = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')
     lda.fit(X, Y)
     Y_pred = lda.predict(X)
-    report = classification_report(Y, Y_pred, output_dict=True, zero_division=0)
+    acc = balanced_accuracy_score(Y, Y_pred)
     if return_preds:
-        return report['accuracy'], None, None, (Y_pred, Y)
-    return report['accuracy'], None, None
+        return acc, None, None, (Y_pred, Y)
+    return acc, None, None
 
 
 def get_pairwise_decodings(predictor, target):
     """LDA decoding accuracy for every ordered pair of target states.
 
     Returns a (n_states, n_states) matrix with 1.0 on the diagonal and the
-    pairwise LDA training accuracy off-diagonal.
+    pairwise LDA balanced training accuracy off-diagonal. Balanced accuracy
+    corrects for unequal state visitation: a pair with identical
+    representations scores 0.5 regardless of how imbalanced it is.
     """
     unique_targets = target.unique().tolist()
     all_pairs = list(product(unique_targets, repeat=2))

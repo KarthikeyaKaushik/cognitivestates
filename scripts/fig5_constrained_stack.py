@@ -22,9 +22,9 @@ Usage:
   python scripts/fig5_constrained_stack.py --seeds 5
   python scripts/fig5_constrained_stack.py --fixed-readout-sweep
   python scripts/fig5_constrained_stack.py --fixed-readout-sweep --readout-scale 4 --lnorms 0 2 3 4
-  python scripts/fig5_constrained_stack.py --curated-summary results/constrained_penalty_sweep/summaries/31ef8554536726b5
-  python scripts/fig5_constrained_stack.py --auc-histogram-summary results/constrained_penalty_sweep/summaries/31ef8554536726b5
-  python scripts/fig5_constrained_stack.py --accuracy-summary results/constrained_penalty_sweep/summaries/31ef8554536726b5
+  python scripts/fig5_constrained_stack.py --curated-summary results/constrained_penalty_sweep/summaries/<id>
+  python scripts/fig5_constrained_stack.py --auc-histogram-summary results/constrained_penalty_sweep/summaries/<id>
+  python scripts/fig5_constrained_stack.py --accuracy-summary results/constrained_penalty_sweep/summaries/<id>
 
 The fixed-readout sweep uses lnorm 2..15, seeds 1..50, 2000 epochs and no
 outlier filtering. It reuses the per-run checkpoints and heatmaps from
@@ -34,9 +34,11 @@ defaults. Readout scale defaults to 1 (the seeded initial row norms).
 Use --lnorms 0 for the no-activity-penalty condition, or include 0 alongside
 positive values to compare them. Zero is a special case, not 1/0.
 --curated-summary replots saved ROC-AUC winners for lnorm 1..6, excluding
-two manually identified runs. It writes separate outputs and never retrains.
+(and printing) every run whose winning coloring uses 15 colors. It writes
+separate outputs and never retrains. The fixed-readout sweep draws this plot
+automatically once its lnorms cover 1..6.
 --auc-histogram-summary plots count histograms for colorings 1, 2 and 11 across
-all runs at lnorm 1..6, including the two excluded from the curated barplot.
+all runs at lnorm 1..6, including any excluded from the curated barplot.
 It recomputes AUC from cached heatmaps, never trains or regenerates heatmaps.
 The visible AUC range is 0.5 to 1; scores outside that range remain in the CSV.
 --accuracy-summary plots final-checkpoint training and held-out accuracies in
@@ -73,10 +75,6 @@ HIDDEN_DIM = 5
 EPOCHS = 1000
 HEATMAP_DIR = FIGURES_DIR / 'fig3_heatmaps'
 # Dropping because of misidentification
-CURATED_EXCLUSIONS = {
-    'lnorm1_seed74_ep2000_2d08607dd7cfa48c': 1.0,
-    'lnorm3_seed10_ep2000_9bf612a28eecbae6': 3.0,
-}
 CURATED_LNORMS = (1, 2, 3, 4, 5, 6)
 HISTOGRAM_COLORINGS = (1, 2, 11)
 
@@ -150,6 +148,8 @@ def save_cached_accuracy_boxplot(summary_dir):
         try:
             sns.boxplot(data=selected, x='lnorm', y=column,
                         order=labels, color='lightgray', ax=ax)
+            if column == 'test_accuracy':
+                ax.set_xticklabels([f'1/{value:g}' for value in CURATED_LNORMS])
             ax.set_xlabel('Lnorm penalty', fontsize=16)
             ax.set_ylabel('Accuracy', fontsize=16)
             fig.tight_layout()
@@ -232,7 +232,11 @@ def save_ncolors_stackedbar(df, matrices, lattice, *, lnorms=None, output_dir=No
 
 
 def curated_winners(summary_dir):
-    """Select the specified saved winners, preserving the original results."""
+    """Keep saved winners for lnorm 1..6, dropping 15-color winners.
+
+    Every run whose winning coloring uses 15 colors is excluded and printed;
+    the saved winners file is never modified.
+    """
     winners = pd.read_csv(summary_dir / 'coloring_winners.csv')
     required = {'run_key', 'lnorm', 'nstates', 'auc'}
     missing = required.difference(winners.columns)
@@ -240,13 +244,13 @@ def curated_winners(summary_dir):
         raise ValueError(f'Missing winner columns: {sorted(missing)}')
     if winners['run_key'].duplicated().any():
         raise ValueError('Duplicate run IDs in coloring winners')
-    for run_key, lnorm in CURATED_EXCLUSIONS.items():
-        excluded = winners[winners['run_key'] == run_key]
-        if len(excluded) != 1 or excluded['lnorm'].iloc[0] != lnorm \
-                or excluded['nstates'].iloc[0] != 15:
-            raise ValueError(f'Expected 15-color winner not found: {run_key}')
-    selected = winners[winners['lnorm'].isin(CURATED_LNORMS)
-                       & ~winners['run_key'].isin(CURATED_EXCLUSIONS)].copy()
+    in_range = winners[winners['lnorm'].isin(CURATED_LNORMS)]
+    excluded = in_range[in_range['nstates'] == 15]
+    for row in excluded.itertuples():
+        print(f'Excluding 15-color winner: {row.run_key} '
+              f'(lnorm={row.lnorm:g}, auc={row.auc:.4f})', flush=True)
+    print(f'Excluded {len(excluded)} run(s) with 15-color winners', flush=True)
+    selected = in_range[in_range['nstates'] != 15].copy()
     if set(selected['lnorm']) != set(CURATED_LNORMS):
         raise ValueError('Saved winners do not cover every requested lnorm 1 through 6')
     return selected
@@ -276,7 +280,7 @@ def save_curated_stackedbar(summary_dir):
                     color=palette[nstates], alpha=0.8, height=1.0)
             left += pivot[nstates].values
         ax.set_yticks(y)
-        ax.set_yticklabels([f'{value:g} ({1 / value:.3g})' for value in pivot.index])
+        ax.set_yticklabels([f'1/{value:g}' for value in pivot.index])
         ax.set_xlabel('Proportion', fontsize=16)
         ax.set_ylabel('lnorm penalty', fontsize=16)
         ax.legend(title='N colors', loc='upper left', bbox_to_anchor=(1.02, 0.65),
@@ -406,6 +410,11 @@ def run_fixed_readout_sweep(lnorms, n_seeds, epochs, *, readout_scale=1.0):
         save_ncolors_stackedbar(df, matrices, lattice, lnorms=lnorms,
                                 output_dir=summary_dir, readout_scale=readout_scale)
         print(f'Coloring summary updated after lnorm={lnorm:g}: {summary_dir}',
+              flush=True)
+    if set(CURATED_LNORMS).issubset(lnorms):
+        save_curated_stackedbar(summary_dir)
+    else:
+        print('Skipping curated stacked bar: sweep lnorms do not cover 1 through 6',
               flush=True)
     return summary_dir
 
