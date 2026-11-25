@@ -1,0 +1,9 @@
+# Tested with Python 3.12. Graphviz (system package providing `neato`) is
+# additionally required by scripts/plot_behavior_diagram.py.
+torch>=2.2
+numpy>=1.26,<2
+pandas>=2.2
+scikit-learn>=1.4
+matplotlib>=3.8
+seaborn>=0.13
+colorcet>=3.0
