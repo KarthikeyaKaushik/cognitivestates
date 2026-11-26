@@ -70,26 +70,42 @@ class PhaseTransitionTests(unittest.TestCase):
     def test_proposals_exclude_undefined_auc_and_are_reproducible(self):
         first = figure.make_proposals(tiny_lattice(), 10, 0)
         second = figure.make_proposals(tiny_lattice(), 10, 0)
-        self.assertEqual(len(first), 11)
-        self.assertEqual(set(first) - {f'rand_{i}' for i in range(10)}, {'cc_3'})
+        self.assertEqual(len(first), 21)
+        random_names = ({f'rand_{i}' for i in range(10)}
+                        | {f'part_{i}' for i in range(10)})
+        self.assertEqual(set(first) - random_names, {'cc_3'})
         for key in first:
             np.testing.assert_array_equal(first[key], second[key])
             self.assertEqual(set(first[key]), {0, 1})
+        # partition proposals must be transitive (valid partitions)
+        n = 3
+        triangle = np.triu_indices(n, k=1)
+        for index in range(10):
+            same = np.eye(n, dtype=bool)
+            same[triangle] = first[f'part_{index}'] == 0
+            same |= same.T
+            for a in range(n):
+                for b in range(n):
+                    for c in range(n):
+                        if same[a, b] and same[b, c]:
+                            self.assertTrue(same[a, c])
         matrix = np.array([[1, 0.9, 0.6], [0.9, 1, 0.5], [0.6, 0.5, 1]])
         scores = figure.score_proposals(matrix, first, 0, 2, 't+')
         self.assertEqual(scores.loc[scores['candidate'] == 'cc_3', 'auc'].iloc[0], 1)
+        self.assertEqual(set(scores['comparison']), {'cc', 'rand', 'part'})
 
     def test_winners_selected_after_transition_and_reused_before(self):
         scores = pd.DataFrame([
             dict(seed=0, epoch=epoch, t=t, comparison=family,
                  candidate=f'{family}_{candidate}', auc=auc)
-            for family in ('cc', 'rand')
+            for family in ('cc', 'rand', 'part')
             for candidate, pair in ((1, [0.99, 0.7]), (2, [0.6, 0.9]))
             for t, epoch, auc in zip(('t-', 't+'), (1, 3), pair)
         ])
         summary = figure.select_winners(scores)
-        self.assertEqual(set(summary['candidate']), {'cc_2', 'rand_2'})
-        np.testing.assert_array_equal(summary.loc[summary['t'] == 't-', 'auc'], [0.6, 0.6])
+        self.assertEqual(set(summary['candidate']), {'cc_2', 'rand_2', 'part_2'})
+        np.testing.assert_array_equal(summary.loc[summary['t'] == 't-', 'auc'],
+                                      [0.6, 0.6, 0.6])
 
     def test_training_matches_shared_trainer_and_probes_do_not_change_rng(self):
         torch.manual_seed(0)
@@ -128,8 +144,8 @@ class PhaseTransitionTests(unittest.TestCase):
                 patch.object(figure, 'identify_breakthroughs', side_effect=mark_transition):
             history, scores, summary, heatmaps, labels = figure.compute_analysis(config, 0)
         self.assertEqual(len(history), 4)
-        self.assertEqual(len(scores), 8)
-        self.assertEqual(len(summary), 4)
+        self.assertEqual(len(scores), 14)  # (1 cc + 3 rand + 3 part) x 2 checkpoints
+        self.assertEqual(len(summary), 6)
         self.assertEqual(set(summary['epoch']), {0, 2})
         self.assertEqual(set(heatmaps), {'t-', 't+'})
         for matrix in heatmaps.values():

@@ -10,18 +10,24 @@ hidden dimension 5, lnorm 1.2, 5000 epochs, seeds 0..100, Adam lr=.001, batch
 size 128, and an 80/20 split. The legacy loss-change score uses delta=100.
 At t-=peak-delta and t+=peak+delta (zero-based epochs, AFTER the update),
 full-hidden-vector pairwise LDA balanced TRAINING accuracies are compared with
-the upper triangles of consistent-coloring matrices and 100 Bernoulli random
-pair masks. This is the legacy in-sample analysis, NOT the held-out 2D SVM
-analysis used for the other decoding figures; unlike the legacy code, the
-pairwise accuracies are balanced, so unequal state visitation cannot inflate
-them. Each family's winner is selected at t+ and that SAME candidate is
-plotted at both checkpoints.
+the upper triangles of consistent-coloring matrices, 100 Bernoulli random
+pair masks, and 100 random state partitions. This is the legacy in-sample
+analysis, NOT the held-out 2D SVM analysis used for the other decoding
+figures; unlike the legacy code, the pairwise accuracies are balanced, so
+unequal state visitation cannot inflate them. Each family's winner is
+selected at t+ and that SAME candidate is plotted at both checkpoints.
+The line plot shows consistent colorings vs. the best random partition;
+the Bernoulli-mask family stays in scores.csv/summary.csv but is not plotted.
 
 Two legacy bugs are corrected: one-class proposals are excluded because
 ROC-AUC is undefined, and the checkpoint replay restores the original weights
 and batching RNG. Probing cannot change subsequent training batches. Thus
 both passes follow the same trajectory, including seed 0. Random masks are
-seeded and have at least one pair of each class; they are not partitions.
+seeded and have at least one pair of each class; they are not partitions
+(independent pair labels almost always violate transitivity). The random
+partitions are valid by construction: each shuffles the states into blocks,
+with block counts drawn from the nontrivial colorings' sizes, so they test
+task consistency specifically rather than mere partition structure.
 
 Each seed caches training.csv, scores.csv, summary.csv, heatmaps.npz, and
 config.json under results/phase_transitions/<configuration>/seed<N>/.
@@ -66,8 +72,9 @@ DEFAULTS = dict(task='limitedstack', train_L=7, hidden_dim=5, lnorm=1.2,
                 epochs=5000, learning_rate=0.001, batch_size=128,
                 delta=100, num_random=100)
 N_SEEDS = 101
-CACHE_VERSION = 1
-COLORS = {'cc': cc.glasbey[3], 'rand': '#9A9498'}
+CACHE_VERSION = 2  # v2: balanced pairwise accuracy + random-partition baseline
+FAMILIES = ('cc', 'rand', 'part')
+COLORS = {'cc': cc.glasbey[3], 'rand': '#9A9498', 'part': '#9A9498'}
 
 
 def identify_breakthroughs(loss_df, delta=100):
@@ -97,12 +104,20 @@ def transition_epochs(history, delta):
 
 
 def make_proposals(lattice, num_random, seed):
-    """Nontrivial consistent matrices and legacy Bernoulli upper-triangle masks."""
+    """Nontrivial consistent matrices plus two random baselines.
+
+    rand_<i>: legacy Bernoulli upper-triangle masks (independent pair labels,
+    density matched to the consistent colorings; almost never valid partitions).
+    part_<i>: random partitions of the states, with block counts drawn from the
+    nontrivial colorings' sizes; their pairwise matrices are transitive by
+    construction, so they test task consistency rather than partition validity.
+    """
     if num_random < 1:
         raise ValueError('num_random must be positive.')
     n_states = lattice.nodes[0].pairwise_matrix.shape[0]
     triangle = np.triu_indices(n_states, k=1)
     proposals = {}
+    block_counts = []
     skipped = 0
     for node in lattice.nodes:
         proposal = np.asarray(node.pairwise_matrix[triangle], dtype=int)
@@ -110,6 +125,10 @@ def make_proposals(lattice, num_random, seed):
             skipped += 1
             continue
         proposals[f'cc_{node.id}'] = proposal
+        same = (np.asarray(node.pairwise_matrix) == 0)
+        np.fill_diagonal(same, True)
+        blocks = np.unique(same, axis=0).shape[0]
+        block_counts.append(min(max(blocks, 2), n_states - 1))
     if not proposals:
         raise ValueError('No consistent coloring has a defined pairwise ROC-AUC.')
     print(f'Excluded {skipped} one-class consistent coloring(s) from ROC-AUC.')
@@ -124,6 +143,17 @@ def make_proposals(lattice, num_random, seed):
                 break
         else:
             raise RuntimeError('Could not generate a two-class random pair mask.')
+    for index in range(num_random):
+        # 2 <= blocks <= n-1 guarantees at least one merged and one distinct pair
+        blocks = int(rng.choice(block_counts))
+        permutation = rng.permutation(n_states)
+        cuts = np.sort(rng.choice(np.arange(1, n_states), size=blocks - 1,
+                                  replace=False))
+        labels = np.empty(n_states, dtype=int)
+        for group, members in enumerate(np.split(permutation, cuts)):
+            labels[members] = group
+        proposals[f'part_{index}'] = (labels[triangle[0]]
+                                      != labels[triangle[1]]).astype(int)
     return proposals
 
 
@@ -136,7 +166,7 @@ def score_proposals(matrix, proposals, seed, epoch, timepoint):
         raise ValueError('Pairwise decoding contains nonfinite accuracies.')
     return pd.DataFrame([
         dict(seed=seed, epoch=epoch, t=timepoint, candidate=name,
-             comparison='rand' if name.startswith('rand_') else 'cc',
+             comparison=name.split('_', 1)[0],
              auc=roc_auc_score(proposal, scores))
         for name, proposal in proposals.items()
     ])
@@ -145,7 +175,7 @@ def score_proposals(matrix, proposals, seed, epoch, timepoint):
 def select_winners(scores):
     """Choose each family's t+ winner, keeping its paired t- measurement."""
     rows = []
-    for comparison in ('cc', 'rand'):
+    for comparison in FAMILIES:
         family = scores[scores['comparison'] == comparison]
         after = family[family['t'] == 't+']
         winner = after.loc[after['auc'].idxmax(), 'candidate']
@@ -295,27 +325,38 @@ def plot_seed(history, summary, heatmaps, labels, seed, prefix):
 
 
 def plot_comparison(summary, suffix=''):
+    """Line plot of consistent colorings vs. the best random partition.
+
+    The Bernoulli-mask family is scored and cached in scores.csv/summary.csv
+    but not plotted.
+    """
+    families = ('cc', 'part')
     wide = summary.pivot(index='seed', columns=['t', 'comparison'], values='auc')
-    order = [('t-', 'cc'), ('t-', 'rand'), ('t+', 'cc'), ('t+', 'rand')]
+    order = [(t, family) for t in ('t-', 't+') for family in families]
     wide = wide.reindex(columns=pd.MultiIndex.from_tuples(order))
     if wide.isna().any().any():
-        raise ValueError('The comparison plot requires both families at both checkpoints.')
-    positions = np.array([1.1, 1.4, 2.3, 2.6])
+        raise ValueError('The comparison plot requires every family at both checkpoints.')
+    centers = {'t-': 1.25, 't+': 2.45}
+    offsets = np.linspace(-0.15, 0.15, len(families))
+    positions = np.array([centers[t] + offsets[families.index(family)]
+                          for t, family in order])
     jitter = np.random.default_rng(0).normal(0, 0.05, wide.shape) + positions
     fig, ax = plt.subplots(figsize=(6, 5))
     for index, (_, family) in enumerate(order):
         ax.plot(jitter[:, index], wide.iloc[:, index], 'o', alpha=0.7,
                 zorder=1, ms=8, mew=1, color=COLORS[family])
     for index in range(len(wide)):
-        for family, columns in (('cc', [0, 2]), ('rand', [1, 3])):
+        for family in families:
+            columns = [order.index(('t-', family)), order.index(('t+', family))]
             ax.plot(jitter[index, columns], wide.iloc[index, columns],
                     color=COLORS[family], linewidth=0.5, zorder=-1, alpha=0.3)
-    ax.set_xticks([1.25, 2.45], labels=['t-', 't+'], fontsize=16)
+    ax.set_xticks([centers['t-'], centers['t+']], labels=['t-', 't+'], fontsize=16)
     ax.set_xlabel('Phase Transition', fontsize=16)
     ax.set_ylabel('AUC', fontsize=16)
     handles = [Line2D([0], [0], marker='o', color='w', label=label,
                       markerfacecolor=COLORS[family], markersize=8)
-               for family, label in (('cc', 'Consistent coloring'), ('rand', 'Best Random'))]
+               for family, label in (('cc', 'Consistent coloring'),
+                                     ('part', 'Best random partition'))]
     ax.legend(handles=handles, loc='lower right', frameon=False)
     save_figure(f'fig7_phase_transition_lineplot{suffix}')
     plt.close(fig)
@@ -331,7 +372,8 @@ def main():
     parser.add_argument('--recompute', action='store_true')
     args = parser.parse_args()
     if min(args.seeds, args.delta, args.hidden_dim, args.num_random) < 1:
-        parser.error('Seeds, delta, hidden dimension, and random-mask count must be positive.')
+        parser.error('Seeds, delta, hidden dimension, and random baseline count '
+                     'must be positive.')
     if not np.isfinite(args.lnorm) or args.lnorm <= 0:
         parser.error('--lnorm must be finite and positive.')
     if args.epochs <= 2 * args.delta:
